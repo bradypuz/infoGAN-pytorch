@@ -1,19 +1,25 @@
 import torch.nn as nn
 
-
+nc = 3
 class FrontEnd(nn.Module):
   ''' front end part of discriminator and Q'''
-
   def __init__(self):
     super(FrontEnd, self).__init__()
-
+    self.nc = nc
     self.main = nn.Sequential(
-      nn.Conv2d(1, 64, 4, 2, 1),
+      #nc*64*64
+      nn.Conv2d(self.nc, 64, 4, 2, 1),
       nn.LeakyReLU(0.1, inplace=True),
+      #64*32*32
       nn.Conv2d(64, 128, 4, 2, 1, bias=False),
       nn.BatchNorm2d(128),
       nn.LeakyReLU(0.1, inplace=True),
-      nn.Conv2d(128, 1024, 7, bias=False),
+      #128*16*16
+      nn.Conv2d(128, 256, 4, 2, 1, bias=False),
+      nn.BatchNorm2d(256),
+      nn.LeakyReLU(0.1, inplace=True),
+      #256*8*8
+      nn.Conv2d(256, 1024, 8, 1, 0, bias=False),
       nn.BatchNorm2d(1024),
       nn.LeakyReLU(0.1, inplace=True),
     )
@@ -67,18 +73,27 @@ class G(nn.Module):
 
   def __init__(self):
     super(G, self).__init__()
-
+    self.nc = nc
     self.main = nn.Sequential(
-      nn.ConvTranspose2d(74, 1024, 1, 1, bias=False),
+      #input is c1+c2+noise vector.
+      nn.ConvTranspose2d(104, 1024, 1, 1, bias=False),
       nn.BatchNorm2d(1024),
       nn.ReLU(True),
-      nn.ConvTranspose2d(1024, 128, 7, 1, bias=False),
+      #1024*1
+      nn.ConvTranspose2d(1024, 256, 8, 1, 0, bias=False),
+      nn.BatchNorm2d(256),
+      nn.ReLU(True),
+      #256*8*8
+      nn.ConvTranspose2d(256, 128, 4, 2, 1, bias=False),
       nn.BatchNorm2d(128),
       nn.ReLU(True),
+      #128*16*16
       nn.ConvTranspose2d(128, 64, 4, 2, 1, bias=False),
       nn.BatchNorm2d(64),
       nn.ReLU(True),
-      nn.ConvTranspose2d(64, 1, 4, 2, 1, bias=False),
+      #64*32*32
+      nn.ConvTranspose2d(64, self.nc, 4, 2, 1, bias=False),
+      #3*64*64
       nn.Sigmoid()
     )
 
