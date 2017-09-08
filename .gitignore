@@ -87,3 +87,8 @@ ENV/
 
 # Rope project settings
 .ropeproject
+
+#ignore the downloaded dataset
+dataset/
+.idea/
+checkpoints
