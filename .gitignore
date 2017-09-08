@@ -91,3 +91,9 @@ ENV/
 #images
 *.png
 *.jpg
+
+#.xml
+*.xml
+#folders
+checkpoints/
+.idea/
