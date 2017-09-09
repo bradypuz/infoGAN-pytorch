@@ -1,9 +1,9 @@
 import torch.nn as nn
 
-nDisC = 2
+nDisC = 10
 nConC = 2
 nNoise = 100
-nc = 3
+nc = 1
 
 
 class FrontEnd(nn.Module):
@@ -61,9 +61,9 @@ class Q(nn.Module):
         self.conv = nn.Conv2d(1024, 128, 1, bias=False)
         self.bn = nn.BatchNorm2d(128)
         self.lReLU = nn.LeakyReLU(0.1, inplace=True)
-        self.conv_disc = nn.Conv2d(128, 10, 1)
-        self.conv_mu = nn.Conv2d(128, 2, 1)
-        self.conv_var = nn.Conv2d(128, 2, 1)
+        self.conv_disc = nn.Conv2d(128, nDisC, 1)
+        self.conv_mu = nn.Conv2d(128, nConC, 1)
+        self.conv_var = nn.Conv2d(128, nConC, 1)
 
     def forward(self, x):
         y = self.conv(x)
@@ -104,8 +104,8 @@ class G(nn.Module):
             # 64*32*32
             nn.ConvTranspose2d(64, self.nc, 4, 2, 1, bias=False),
             # 3*64*64
-            nn.Tanh()  # dcgan used tanh here
-            # nn.Sigmoid()
+            # nn.Tanh()  # dcgan used tanh here
+            nn.Sigmoid()
         )
 
     def forward(self, x):
