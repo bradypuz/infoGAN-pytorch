@@ -1,9 +1,9 @@
 import torch.nn as nn
 
-nDisC = 10
+nDisC = 2
 nConC = 2
 nNoise = 100
-nc = 1
+nc = 3
 
 
 class FrontEnd(nn.Module):
@@ -15,23 +15,23 @@ class FrontEnd(nn.Module):
         self.main = nn.Sequential(
             # nc*64*64
             nn.Conv2d(self.nc, 64, 4, 2, 1),
-            nn.LeakyReLU(0.1, inplace=True),
+            nn.LeakyReLU(0.2, inplace=True),
             # 64*32*32
             nn.Conv2d(64, 128, 4, 2, 1, bias=False),
             nn.BatchNorm2d(128),
-            nn.LeakyReLU(0.1, inplace=True),
+            nn.LeakyReLU(0.2, inplace=True),
             # 128*16*16
             nn.Conv2d(128, 256, 4, 2, 1, bias=False),
             nn.BatchNorm2d(256),
-            nn.LeakyReLU(0.1, inplace=True),
+            nn.LeakyReLU(0.2, inplace=True),
             # 256*8*8
             nn.Conv2d(256, 512, 4, 2, 1, bias=False),
             nn.BatchNorm2d(512),
-            nn.LeakyReLU(0.1, inplace=True),
+            nn.LeakyReLU(0.2, inplace=True),
             # 512*4*4
-            nn.Conv2d(512, 1024, 4, 1, 0, bias=False),
-            nn.BatchNorm2d(1024),
-            nn.LeakyReLU(0.1, inplace=True),
+            # nn.Conv2d(512, 1024, 4, 1, 0, bias=False),
+            # nn.BatchNorm2d(1024),
+            # nn.LeakyReLU(0.2, inplace=True),
             # 1024*1*1
         )
 
@@ -45,7 +45,7 @@ class D(nn.Module):
         super(D, self).__init__()
 
         self.main = nn.Sequential(
-            nn.Conv2d(1024, 1, 1),
+            nn.Conv2d(512, 1, 4, 1, 0, bias=False),
             nn.Sigmoid()
         )
 
@@ -57,18 +57,27 @@ class D(nn.Module):
 class Q(nn.Module):
     def __init__(self):
         super(Q, self).__init__()
+        self.main = nn.Sequential(
+            # 51*4*4
+            nn.Conv2d(512, 128, 4, 1, 0, bias=False),
+            nn.BatchNorm2d(128),
+            nn.LeakyReLU(0.2, inplace=True)
+            # 128*1*1
+        )
 
-        self.conv = nn.Conv2d(1024, 128, 1, bias=False)
-        self.bn = nn.BatchNorm2d(128)
-        self.lReLU = nn.LeakyReLU(0.1, inplace=True)
-        self.conv_disc = nn.Conv2d(128, nDisC, 1)
+        self.conv_disc = nn.Sequential(
+            nn.Linear(128,nDisC),
+            # nn.ReLU(),
+            # nn.Dropout(),
+            # nn.Linear(64, nDisC),
+        )
         self.conv_mu = nn.Conv2d(128, nConC, 1)
         self.conv_var = nn.Conv2d(128, nConC, 1)
 
     def forward(self, x):
-        y = self.conv(x)
+        y = self.main(x)
 
-        disc_logits = self.conv_disc(y).squeeze()
+        disc_logits = self.conv_disc(y.view(-1, 128))
 
         mu = self.conv_mu(y).squeeze()
         var = self.conv_var(y).squeeze().exp()
@@ -82,11 +91,11 @@ class G(nn.Module):
         self.nc = nc
         self.main = nn.Sequential(
             # input is c1+c2+noise vector.
-            nn.ConvTranspose2d(nDisC + nConC + nNoise, 1024, 1, 1, bias=False),
-            nn.BatchNorm2d(1024),
-            nn.ReLU(True),
+            # nn.ConvTranspose2d(nDisC + nConC + nNoise, 1024, 1, 1, bias=False),
+            # nn.BatchNorm2d(1024),
+            # nn.ReLU(True),
             # 1024*1*1
-            nn.ConvTranspose2d(1024, 512, 4, 1, 0, bias=False),
+            nn.ConvTranspose2d(nDisC + nConC + nNoise, 512, 4, 1, 0, bias=False),
             nn.BatchNorm2d(512),
             nn.ReLU(True),
             # 512*4*4
@@ -104,8 +113,8 @@ class G(nn.Module):
             # 64*32*32
             nn.ConvTranspose2d(64, self.nc, 4, 2, 1, bias=False),
             # 3*64*64
-            # nn.Tanh()  # dcgan used tanh here
-            nn.Sigmoid()
+            nn.Tanh()  # dcgan used tanh here
+            # nn.Sigmoid()
         )
 
     def forward(self, x):
