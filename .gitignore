@@ -96,5 +96,6 @@ ENV/
 *.xml
 #folders
 checkpoints/
+checkpoints_forget/
 .idea/workspace.xml
 *.xml

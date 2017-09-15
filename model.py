@@ -77,7 +77,9 @@ class G(nn.Module):
             # 64*32*32
             nn.ConvTranspose2d(64, self.nc, 4, 2, 1, bias=False),
             # 3*64*64
-            nn.Tanh()  # dcgan used tanh here
+            # nn.ReLU(True),
+            nn.Tanh(),  # dcgan used tanh here,
+            # nn.ReLU(True)
             # nn.Sigmoid()
         )
 
