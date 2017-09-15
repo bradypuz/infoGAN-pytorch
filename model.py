@@ -1,9 +1,9 @@
 import torch.nn as nn
+import trainer
 
-nDisC = 2
-nConC = 2
-nNoise = 100
-nc = 3
+nClass = trainer.nClass
+nNoise = trainer.nNoise
+nc = trainer.nc
 
 
 class FrontEnd(nn.Module):
@@ -45,57 +45,21 @@ class D(nn.Module):
         super(D, self).__init__()
 
         self.main = nn.Sequential(
-            nn.Conv2d(512, 1, 4, 1, 0, bias=False),
-            nn.Sigmoid()
+            nn.Conv2d(512, nClass + 1, 4, 1, 0, bias=False),
+            # nn.Sigmoid()
         )
 
     def forward(self, x):
-        output = self.main(x).view(-1, 1)
+        output = self.main(x).view(-1, nClass + 1).squeeze()
         return output
-
-
-class Q(nn.Module):
-    def __init__(self):
-        super(Q, self).__init__()
-        self.main = nn.Sequential(
-            # 51*4*4
-            nn.Conv2d(512, 128, 4, 1, 0, bias=False),
-            nn.BatchNorm2d(128),
-            nn.LeakyReLU(0.2, inplace=True)
-            # 128*1*1
-        )
-
-        self.conv_disc = nn.Sequential(
-            nn.Linear(128,nDisC),
-            # nn.ReLU(),
-            # nn.Dropout(),
-            # nn.Linear(64, nDisC),
-        )
-        self.conv_mu = nn.Conv2d(128, nConC, 1)
-        self.conv_var = nn.Conv2d(128, nConC, 1)
-
-    def forward(self, x):
-        y = self.main(x)
-
-        disc_logits = self.conv_disc(y.view(-1, 128))
-
-        mu = self.conv_mu(y).squeeze()
-        var = self.conv_var(y).squeeze().exp()
-
-        return disc_logits, mu, var
-
 
 class G(nn.Module):
     def __init__(self):
         super(G, self).__init__()
         self.nc = nc
         self.main = nn.Sequential(
-            # input is c1+c2+noise vector.
-            # nn.ConvTranspose2d(nDisC + nConC + nNoise, 1024, 1, 1, bias=False),
-            # nn.BatchNorm2d(1024),
-            # nn.ReLU(True),
-            # 1024*1*1
-            nn.ConvTranspose2d(nDisC + nConC + nNoise, 512, 4, 1, 0, bias=False),
+            # input is #class+noise vector.
+            nn.ConvTranspose2d(nClass + nNoise, 512, 4, 1, 0, bias=False),
             nn.BatchNorm2d(512),
             nn.ReLU(True),
             # 512*4*4

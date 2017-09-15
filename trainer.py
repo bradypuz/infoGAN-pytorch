@@ -22,22 +22,29 @@ import matplotlib.pyplot as plt
 dataset_type = 'lsun'
 dataroot = '/home/zeyuan/lsun/lmdb'
 lsun_classes=['conference_room_train', 'bridge_train']
+
 # dataset_type = 'folder'
 # dataroot = '/home/zeyuan/dataset/places'
+
 # dataset_type = 'mnist'
 # dataroot = '/home/zeyuan/dataset/mnist'
-outf = './checkpoints/lsun/bridge_conference_room.0002'
+
+outf = './checkpoints/lsun/multi_conference_room_bridge_1.0'
+
+nClass = 2
 
 workers = 2
 imageSize = 64
-nDisC = 2
-nConC = 2
 nNoise = 100
+nc = 3
+if dataset_type == 'mnist':
+    nc = 1
 nEpoch = 100
 nCPerRow = 10
 lr_D = 0.0002
 lr_G = 0.0002
 normalizeImage = True
+
 
 try:
     os.makedirs(outf)
@@ -54,25 +61,24 @@ class log_gaussian:
 
 
 class Trainer:
-    def __init__(self, G, FE, D, Q):
+    def __init__(self, G, FE, D):
 
         self.G = G
         self.FE = FE
         self.D = D
-        self.Q = Q
 
         self.batch_size = 100
 
-    def _noise_sample(self, dis_c, con_c, noise, bs):
+    def _noise_sample(self, dis_c, noise, bs):
 
-        idx = np.random.randint(nDisC, size=bs)
-        c = np.zeros((bs, nDisC))
+        idx = np.random.randint(nClass, size=bs)
+        c = np.zeros((bs, nClass))
         c[range(bs), idx] = 1.0
 
         dis_c.data.copy_(torch.Tensor(c))
-        con_c.data.uniform_(-1.0, 1.0)
+        # con_c.data.uniform_(-1.0, 1.0)
         noise.data.uniform_(-1.0, 1.0)
-        z = torch.cat([noise, dis_c, con_c], 1).view(-1, nDisC + nConC + nNoise, 1, 1)
+        z = torch.cat([noise, dis_c], 1).view(-1, nClass + nNoise, 1, 1)
 
         return z, idx
 
@@ -87,26 +93,15 @@ class Trainer:
         plt.close()
 
     def train(self):
-        real_x = torch.FloatTensor(self.batch_size, 1, imageSize, imageSize).cuda()
-        label = torch.FloatTensor(self.batch_size).cuda()
-        dis_c = torch.FloatTensor(self.batch_size, nDisC).cuda()
-        con_c = torch.FloatTensor(self.batch_size, nConC).cuda()
+        real_x = torch.FloatTensor(self.batch_size, nc, imageSize, imageSize).cuda()
+        dis_c = torch.FloatTensor(self.batch_size, nClass).cuda()
+        label = torch.LongTensor(self.batch_size).cuda()
         noise = torch.FloatTensor(self.batch_size, nNoise).cuda()
 
         real_x = Variable(real_x)
-        label = Variable(label, requires_grad=False)
         dis_c = Variable(dis_c)
-        con_c = Variable(con_c)
+        label = Variable(label, requires_grad=False)
         noise = Variable(noise)
-
-        criterionD = nn.BCELoss().cuda()
-        criterionQ_dis = nn.CrossEntropyLoss().cuda()
-        criterionQ_con = log_gaussian()
-
-        optimD = optim.Adam([{'params': self.FE.parameters()}, {'params': self.D.parameters()}], lr=lr_D,
-                            betas=(0.5, 0.999))
-        optimG = optim.Adam([{'params': self.G.parameters()}, {'params': self.Q.parameters()}], lr=lr_G,
-                            betas=(0.5, 0.999))
 
         if dataset_type == 'lsun':
             dataset = dset.LSUN(db_path=dataroot, classes=lsun_classes,
@@ -137,15 +132,33 @@ class Trainer:
 
         dataloader = DataLoader(dataset, batch_size=self.batch_size, shuffle=True, num_workers=workers)
 
+        #calculate weights of each class
+        if dataset_type != 'mnist':
+            #double check if the classes number is set correctly
+            classes = dataloader.dataset.classes
+            if nClass != len(classes):
+                print('The user-defined number of classes is different from the number read from dataset! %d : %d' % (nClass, len(classes)))
+                exit(-1)
+        class_weights = np.ones(nClass + 1)
+        if dataset_type != 'mnist':
+            #assign weights to different classes based on their data size
+            indices = dataloader.dataset.indices
+            n_images = sum(indices)
+            for i in range(nClass):
+                class_weights[i] = n_images / indices[i] # number of images/number in this class; assign 1 to fake class
+
+        criterionD = nn.CrossEntropyLoss(weight=torch.FloatTensor(class_weights)).cuda()
+        # criterionD = nn.CrossEntropyLoss().cuda()
+        # criterionD = nn.BCELoss().cuda()
+
+        optimD = optim.Adam([{'params': self.FE.parameters()}, {'params': self.D.parameters()}], lr=lr_D,
+                            betas=(0.5, 0.999))
+        optimG = optim.Adam([{'params': self.G.parameters()}], lr=lr_G,
+                            betas=(0.5, 0.999))
+
         # fixed random variables
-        c = np.linspace(-1, 1, nCPerRow).reshape(1, -1)
-        c = np.repeat(c, 10, 0).reshape(-1, 1)
-
-        c1 = np.hstack([c, np.zeros_like(c)])
-        c2 = np.hstack([np.zeros_like(c), c])
-
-        idx = np.arange(nDisC).repeat(100 / nDisC)
-        one_hot = np.zeros((100, nDisC))
+        idx = np.arange(nClass).repeat(100 / nClass)
+        one_hot = np.zeros((100, nClass))
         one_hot[range(100), idx] = 1
         fix_noise = torch.Tensor(100, nNoise).uniform_(-1, 1)
 
@@ -156,29 +169,32 @@ class Trainer:
             D_loss_epoch = np.zeros(len(dataloader))
             G_loss_epoch = np.zeros(len(dataloader))
             for num_iters, batch_data in enumerate(dataloader, 0):
+                # D loss
                 # real part
                 optimD.zero_grad()
-                x, _ = batch_data
+                x, batch_labels = batch_data
+                # x, _ = batch_data
                 bs = x.size(0)
                 real_x.data.resize_(x.size())
                 label.data.resize_(bs)
-                dis_c.data.resize_(bs, nDisC)
-                con_c.data.resize_(bs, nConC)
+                dis_c.data.resize_(bs, nClass)
                 noise.data.resize_(bs, nNoise)
 
                 real_x.data.copy_(x)
                 fe_out1 = self.FE(real_x)
                 probs_real = self.D(fe_out1)
-                label.data.fill_(1)
+                # label.data.fill_(1)
+                label.data.copy_(batch_labels)
+                # target = Variable(torch.LongTensor(batch_labels).cuda())
                 loss_real = criterionD(probs_real, label)
                 loss_real.backward()
 
                 # fake part
-                z, idx = self._noise_sample(dis_c, con_c, noise, bs)
+                z, idx = self._noise_sample(dis_c, noise, bs)
                 fake_x = self.G(z)
                 fe_out2 = self.FE(fake_x.detach())
                 probs_fake = self.D(fe_out2)
-                label.data.fill_(0)
+                label.data.fill_(nClass)    #the generated images are all fake to the D. So they should be classified to the "fake" class
                 loss_fake = criterionD(probs_fake, label)
                 loss_fake.backward()
 
@@ -186,66 +202,44 @@ class Trainer:
 
                 optimD.step()
 
-                # G and Q part
+                # G loss
                 optimG.zero_grad()
 
                 fe_out = self.FE(fake_x)
                 probs_fake = self.D(fe_out)
-                label.data.fill_(0.9)
-
-                reconstruct_loss = criterionD(probs_fake, label)
-
-                q_logits, q_mu, q_var = self.Q(fe_out)
-                class_ = torch.LongTensor(idx).cuda()
-                target = Variable(class_)
-                dis_loss = criterionQ_dis(q_logits, target)
-                con_loss = criterionQ_con(con_c, q_mu, q_var) * 0.1
-
-                G_loss = reconstruct_loss + dis_loss + con_loss
+                label.data.copy_(torch.LongTensor(idx))
+                G_loss = criterionD(probs_fake, label)    #G tries to make D "believe" that the generated image should be classified to a real class
                 G_loss.backward()
                 optimG.step()
 
                 D_loss_epoch[num_iters] = D_loss.data[0]
                 G_loss_epoch[num_iters] = G_loss.data[0]
                 if num_iters % 10 == 0:
-                    # print('Epoch/Iter:{0}/{1}, Dloss: {2}, Gloss: {3}'.format(
-                    #     epoch, num_iters, D_loss.data.cpu().numpy(),
-                    #     G_loss.data.cpu().numpy())
-                    # )
                     print('[%d/%d][%d/%d] Loss_D: %.4f Loss_G: %.4f'
                           % (epoch, nEpoch, num_iters, len(dataloader),
                              D_loss.data[0], G_loss.data[0]))
 
                     # save the randomly generated images
                     save_image(fake_x.data,
-                               '%s/fake_samples_latest.png' % outf,
+                               '%s/random_fake_samples_latest.png' % outf,
                                normalize=normalizeImage, nrow=10)
                     save_image(fake_x.data,
-                               '%s/fake_samples_epoch_%d.png' % (outf, epoch),
+                               '%s/random_fake_samples_epoch_%d.png' % (outf, epoch),
                                normalize=normalizeImage, nrow=10)
 
+                    #reproduce images using saved noise and class settings
                     noise.data.copy_(fix_noise)
                     dis_c.data.copy_(torch.Tensor(one_hot))
 
-                    con_c.data.copy_(torch.from_numpy(c1))
-                    z = torch.cat([noise, dis_c, con_c], 1).view(-1, nDisC + nConC + nNoise, 1, 1)
+                    z = torch.cat([noise, dis_c], 1).view(-1, nClass + nNoise, 1, 1)
                     x_save = self.G(z)
                     save_image(x_save.data,
-                               '%s/c1_fake_samples_epoch_%d.png' % (outf, epoch),
+                               '%s/fixed_fake_samples_epoch_%d.png' % (outf, epoch),
                                normalize=normalizeImage, nrow=nCPerRow)
                     save_image(x_save.data,
-                               '%s/c1_fake_latest.png' % (outf),
+                               '%s/fixed_fake_latest.png' % (outf),
                                normalize=normalizeImage, nrow=nCPerRow)
 
-                    con_c.data.copy_(torch.from_numpy(c2))
-                    z = torch.cat([noise, dis_c, con_c], 1).view(-1, nDisC + nConC + nNoise, 1, 1)
-                    x_save = self.G(z)
-                    save_image(x_save.data,
-                               '%s/c2_fake_samples_epoch_%d.png' % (outf, epoch),
-                               normalize=normalizeImage, nrow=nCPerRow)
-                    save_image(x_save.data,
-                               '%s/c2_fake_latest.png' % (outf),
-                               normalize=normalizeImage, nrow=nCPerRow)
                     self.draw('Loss of epoch %d' % epoch,
                               '%s/loss_epoch_%d.pdf' % (outf, epoch),
                               D_loss_epoch, G_loss_epoch)
