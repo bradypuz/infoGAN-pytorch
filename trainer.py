@@ -10,6 +10,8 @@ import torchvision.datasets as dset
 import torchvision.transforms as transforms
 from torch.utils.data import DataLoader
 from torchvision.utils import save_image
+import pytorch_fft.fft.autograd as fft_autograd
+import torch.nn.functional as F
 
 import numpy as np
 # for loss plot
@@ -29,20 +31,25 @@ dataroot = '/home/zeyuan/dataset/places'
 # dataset_type = 'mnist'
 # dataroot = '/home/zeyuan/dataset/mnist'
 
-outf = './checkpoints/places/mag_loss_railroad_skyscraper_1.0'
+# outf = './checkpoints/mnist/D_Mag_takeTurn_0.2'
+
+outf = './checkpoints/places/D_Mag_0.2_lrMag_0.000025_lr_D_0.0001_low_pass_skyscraper_bridge'
 
 nClass = 2
 
 workers = 2
 imageSize = 64
+magnitudeSize = 64
 nNoise = 100
 nc = 3
 if dataset_type == 'mnist':
     nc = 1
-nEpoch = 100
+nEpoch = 200
 nCPerRow = 10
-lr_D = 0.0002
-lr_G = 0.0002
+lr_D = 0.0001
+lr_G = 0.0001
+lr_mag = 0.000025
+weigth_D_mag = 0.2
 normalizeImage = True
 
 
@@ -59,19 +66,76 @@ class log_gaussian:
 
         return logli.sum(1).mean().mul(-1)
 
+class myresize(torch.autograd.Function):
+    def forward(self, input):
+        output = input.clone()
+
+        return output.resize_(input.size(0), 1, input.size(1), input.size(2))
+    def backward(self, grad_outputs):
+        grad_inputs = grad_outputs.clone()
+
+        return grad_inputs.resize_(grad_outputs.size(0), grad_outputs.size(2), grad_outputs.size(3))
+
+class mylowpass(torch.autograd.Function):
+    def forward(self, input):
+        _,_,rows, cols = input.shape
+        crow, ccol = int(rows / 2), int(cols / 2)
+        output = torch.zeros(input.size()).cuda()
+        output[:, :,  crow - 16:crow + 16, ccol - 16:ccol + 16] = input[:, :, crow - 16:crow + 16, ccol - 16:ccol + 16]
+        return output
+
+    def backward(self, grad_outputs):
+        _, _, rows, cols = grad_outputs.shape
+        crow, ccol = int(rows / 2), int(cols / 2)
+        grad_inputs = grad_outputs.clone()
+        grad_inputs[:, :, 0 : crow - 16, :] = 0
+        grad_inputs[:, :, crow+16: rows, :] = 0
+        grad_inputs[:, :, :, 0 : ccol - 16] = 0
+        grad_inputs[:, :, :, ccol+16: cols] = 0
+        return grad_inputs
+
+
+class myfftshift(torch.autograd.Function):
+    def forward(self, input):
+        #switch the first quadrant of input with the third, and the second quadrant with the fourth
+        _,_, rows, cols = input.shape
+        half_rows = int(rows/2)
+        half_cols = int(cols/2)
+        output = input.clone()
+        output[:, :, 0: half_rows, 0: half_cols] = input[:, :, half_rows: rows, half_cols : cols]
+        output[:, :, half_rows : rows, half_cols : cols] = input[:, :, 0: half_rows, 0: half_cols]
+        output[:, :, 0: half_rows, half_cols: cols] = input[:, :, half_rows: rows, 0: half_cols]
+        output[:, :, half_rows: rows, 0: half_cols] = input[:, :, 0: half_rows, half_cols : cols]
+
+        return output
+
+    def backward(self, grad_outputs):
+        _, _, rows, cols = grad_outputs.shape
+        half_rows = int(rows / 2)
+        half_cols = int(cols / 2)
+        grad_inputs = grad_outputs.clone()
+        grad_inputs[:, :, 0: half_rows, 0: half_cols] = grad_outputs[:, :, half_rows : rows, half_cols : cols]
+        grad_inputs[:, :, half_rows: rows, half_cols: cols] = grad_outputs[:, :, 0: half_rows, 0: half_cols]
+        grad_inputs[:, :, 0: half_rows, half_cols: cols] = grad_outputs[:, :, half_rows: rows, 0: half_cols]
+        grad_inputs[:, :, half_rows: rows, 0: half_cols] = grad_outputs[:, :, 0: half_rows, half_cols: cols]
+        return grad_inputs
+
+
 
 class Trainer:
-    def __init__(self, G, FE, D):
+    def __init__(self, G, FE, D, D_Mag):
 
         self.G = G
         self.FE = FE
         self.D = D
+        self.D_Mag = D_Mag
 
         self.batch_size = 100
 
     def _noise_sample(self, batch_labels, dis_c, noise, bs):
 
         idx = batch_labels.int().cpu().numpy().astype(int)
+        # idx = np.random.randint(nClass, size=bs)
         c = np.zeros((bs, nClass))
         c[range(bs), idx] = 1.0
 
@@ -95,11 +159,11 @@ class Trainer:
         plt.figure()
         plt.subplot(221), plt.imshow(real.data[0][0].cpu().numpy(), cmap='gray')
         plt.title('Real Image'), plt.xticks([]), plt.yticks([])
-        plt.subplot(222), plt.imshow(real_mag.data[0].cpu().numpy(), cmap='gray')
+        plt.subplot(222), plt.imshow(real_mag.data[0][0].cpu().numpy(), cmap='gray')
         plt.title('Magnitude Spectrum'), plt.xticks([]), plt.yticks([])
         plt.subplot(223), plt.imshow(fake.data[0][0].cpu().numpy(), cmap='gray')
         plt.title('Fake Image'), plt.xticks([]), plt.yticks([])
-        plt.subplot(224), plt.imshow(fake_mag.data[0].cpu().numpy(), cmap='gray')
+        plt.subplot(224), plt.imshow(fake_mag.data[0][0].cpu().numpy(), cmap='gray')
         plt.title('Magnitude Spectrum'), plt.xticks([]), plt.yticks([])
         plt.savefig('%s/magnitude_spectrum_random_real.pdf' % outf)
         plt.close()
@@ -107,15 +171,31 @@ class Trainer:
     def image2magnitude(self, img):
         # convert RGB to grayscale and then to magnitude
         # img_gray = np.zeros((img.data.size(0), img.data.size(2), img.data.size(3)))
+        # img_gray = img.clone()
         if img.data.size(1) == 3:
-            img_gray = torch.mean(img.data, 1).cpu().numpy()
+            img_gray = img[:, 0, :, :].mul(0.3).add(img[:, 1, :, :].mul(0.59)).add(img[:, 2, :, :].mul(0.11))
+            img_gray = myresize()(img_gray)
         else:
-            img_gray = img.data.cpu.numpy()
-        frequency = np.fft.fft2(img_gray)
-        fshift = np.fft.fftshift(frequency)
-        magnitude_spectrum = np.log(np.abs(fshift))
+            img_gray = img
 
-        return magnitude_spectrum
+        re, im = fft_autograd.Fft2d()(img_gray, Variable(torch.zeros(img_gray.size()).cuda()))
+        spectrum = (re.pow(2)+ im.pow(2)).log()
+        spectrum = F.relu(spectrum)
+        # spectrum[spectrum!=spectrum] = 0
+        spectrum_shift = myfftshift()(spectrum)
+        spectrum_shift_low = mylowpass()(spectrum_shift)
+        # spectrum = np.fft.fftshift(spectrum)
+
+        # frequency = fft.fft2(img_gray, torch.zeros(img.size()).cuda())
+        # fshift = np.fft.fftshift(frequency)
+        # magnitude_spectrum = np.log(np.abs(fshift))
+        # low pass filter
+        # #http://docs.opencv.org/3.0-beta/doc/py_tutorials/py_imgproc/py_transforms/py_fourier_transform/py_fourier_transform.html
+        # _,_, rows, cols = img.data.shape
+        # crow, ccol = int(rows / 2), int(cols / 2)
+        # magnitude_low = magnitude_spectrum[:, crow - 16:crow + 16, ccol - 16:ccol + 16]
+
+        return spectrum_shift_low
 
 
     def train(self):
@@ -123,13 +203,13 @@ class Trainer:
         dis_c = torch.FloatTensor(self.batch_size, nClass).cuda()
         label = torch.LongTensor(self.batch_size).cuda()
         noise = torch.FloatTensor(self.batch_size, nNoise).cuda()
-        magnitude_real = torch.FloatTensor(self.batch_size, imageSize, imageSize).cuda()
-        magnitude_fake = torch.FloatTensor(self.batch_size, imageSize, imageSize).cuda()
+        magnitude_real = torch.FloatTensor(self.batch_size, 1, magnitudeSize, magnitudeSize).cuda()
+        magnitude_fake = torch.FloatTensor(self.batch_size, 1, magnitudeSize, magnitudeSize).cuda()
 
 
 
         real_x = Variable(real_x)
-        magnitude_real = Variable(magnitude_real)
+        magnitude_real = Variable(magnitude_real, requires_grad=False)
         magnitude_fake = Variable(magnitude_fake)
         dis_c = Variable(dis_c)
         label = Variable(label, requires_grad=False)
@@ -182,11 +262,17 @@ class Trainer:
 
         criterionD = nn.CrossEntropyLoss(weight=torch.FloatTensor(class_weights)).cuda()
         criterion_L1 = nn.L1Loss().cuda()
+        criterion_MSE = nn.MSELoss().cuda()
+        criterionD_Mag = nn.CrossEntropyLoss(weight=torch.FloatTensor(class_weights)).cuda()
 
         optimD = optim.Adam([{'params': self.FE.parameters()}, {'params': self.D.parameters()}], lr=lr_D,
                             betas=(0.5, 0.999))
         optimG = optim.Adam([{'params': self.G.parameters()}], lr=lr_G,
                             betas=(0.5, 0.999))
+        optimG_mag = optim.Adam([{'params': self.G.parameters()}], lr=lr_mag,
+                                betas=(0.5, 0.999))
+        optimD_Mag = optim.Adam([{'params': self.D_Mag.parameters()}], lr=lr_mag,
+                                betas=(0.5, 0.999))
 
         # fixed random variables
         idx = np.arange(nClass).repeat(100 / nClass)
@@ -201,9 +287,6 @@ class Trainer:
             D_loss_epoch = np.zeros(len(dataloader))
             G_loss_epoch = np.zeros(len(dataloader))
             for num_iters, batch_data in enumerate(dataloader, 0):
-                # D loss
-                # real part
-                optimD.zero_grad()
                 x, batch_labels = batch_data
                 bs = x.size(0)
 
@@ -211,9 +294,12 @@ class Trainer:
                 label.data.resize_(bs)
                 dis_c.data.resize_(bs, nClass)
                 noise.data.resize_(bs, nNoise)
-                magnitude_real.data.resize_(x.size(0), x.size(2), x.size(3))
-                magnitude_fake.data.resize_(x.size(0), x.size(2), x.size(3))
+                magnitude_real.data.resize_(bs, 1, magnitudeSize, magnitudeSize) #the size of the last batch might be smaller than the default batch size
+                magnitude_fake.data.resize_(bs, 1, magnitudeSize, magnitudeSize)
 
+                # D loss
+                # real part
+                optimD.zero_grad()
                 real_x.data.copy_(x)
                 fe_out1 = self.FE(real_x)
                 probs_real = self.D(fe_out1)
@@ -233,26 +319,60 @@ class Trainer:
                 D_loss = loss_real + loss_fake
                 optimD.step()
 
-                # G loss
-                optimG.zero_grad()
-                #magnitude loss
-                magnitude_real.data.copy_(torch.FloatTensor(self.image2magnitude(real_x)))
-                magnitude_fake.data.copy_(torch.FloatTensor(self.image2magnitude(fake_x)))
-                magnitude_loss = criterion_L1(magnitude_fake, magnitude_real)  #the difference between two mag map is defined by their the element-wise loss
 
+                #D_Mag loss
+                optimD_Mag.zero_grad()
+                magnitude_real.data.copy_(self.image2magnitude(real_x).data)
+                magnitude_fake= self.image2magnitude(fake_x.detach())
+                #real part
+                probs_mag_real = self.D_Mag(magnitude_real)
+                label.data.copy_(batch_labels)
+                loss_mag_real = criterionD_Mag(probs_mag_real, label) * weigth_D_mag
+                loss_mag_real.backward()
+
+                #fake part
+                probs_mag_fake = self.D_Mag(magnitude_fake.detach())
+                label.data.fill_(nClass)
+                loss_mag_fake = criterionD_Mag(probs_mag_fake,label) * weigth_D_mag
+                loss_mag_fake.backward()
+
+                D_mag_loss = loss_mag_real + loss_mag_fake
+                optimD_Mag.step()
+
+                # G loss
+                optimG_mag.zero_grad()
+                #mag part
+                magnitude_fake = self.image2magnitude(fake_x)
+                probs_mag_fake = self.D_Mag(magnitude_fake)
+                label.data.copy_(torch.LongTensor(idx))
+                G_loss_1 = criterionD_Mag(probs_mag_fake, label) * weigth_D_mag
+                G_loss_1.backward()
+                optimG_mag.step()
+
+                #origin part
+                optimG.zero_grad()
+                fake_x = self.G(z) # regenerate the fake image with the updated G
                 fe_out = self.FE(fake_x)
                 probs_fake = self.D(fe_out)
-                label.data.copy_(torch.LongTensor(idx))
-                G_loss = criterionD(probs_fake, label)  + magnitude_loss    #G tries to make D "believe" that the generated image should be classified to a real class
-                G_loss.backward()
+                G_loss_2 =  criterionD(probs_fake, label)
+                G_loss_2.backward()
                 optimG.step()
+                G_loss = G_loss_1 + G_loss_2
+
+                # G_loss_mag.backward()
+                # G_loss_D = criterionD(probs_fake, label)
+                # G_loss_D.backward()
+                # G_loss = criterion_L1(magnitude_fake, magnitude_real)
+                # G_loss = criterionD(probs_fake, label)    #G tries to make D "believe" that the generated image should be classified to a real class
+                # G_loss.backward()
+                # optimG.step()
 
                 D_loss_epoch[num_iters] = D_loss.data[0]
                 G_loss_epoch[num_iters] = G_loss.data[0]
                 if num_iters % 10 == 0:
-                    print('[%d/%d][%d/%d] Loss_D: %.4f Loss_G: %.4f Loss_Magnitude: %.4f'
+                    print('[%d/%d][%d/%d] Loss_D: %.4f Loss_G: %.4f, LossG_1: %.4f, LossG_2: %.4f, Loss_D_Mag: %.4f'
                           % (epoch, nEpoch, num_iters, len(dataloader),
-                             D_loss.data[0], G_loss.data[0], magnitude_loss.data[0]))
+                             D_loss.data[0], G_loss.data[0], G_loss_1.data[0], G_loss_2.data[0], D_mag_loss.data[0]))
 
                     # save the randomly generated images
                     save_image(fake_x.data,
