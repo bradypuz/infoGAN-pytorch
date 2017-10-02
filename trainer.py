@@ -33,24 +33,26 @@ dataroot = '/home/zeyuan/dataset/places'
 
 # outf = './checkpoints/mnist/D_Mag_takeTurn_0.2'
 
-outf = './checkpoints/places/D_Mag_0.2_lrMag_0.000025_lr_D_0.0001_low_pass_skyscraper_bridge'
+outf = './checkpoints/places/D_Mag_size32_w0.2_lrMag_0.00001_lr_D_0.0002_low_pass_skycraper_bridge_Bias_True_without_log'
 
 nClass = 2
 
 workers = 2
 imageSize = 64
-magnitudeSize = 64
+magnitudeSize = 32
 nNoise = 100
 nc = 3
 if dataset_type == 'mnist':
     nc = 1
 nEpoch = 200
 nCPerRow = 10
-lr_D = 0.0001
-lr_G = 0.0001
-lr_mag = 0.000025
+lr_D = 0.0002
+lr_G = 0.0002
+lr_mag = 0.00001
 weigth_D_mag = 0.2
 normalizeImage = True
+
+load_z_fixed = True
 
 
 try:
@@ -78,20 +80,24 @@ class myresize(torch.autograd.Function):
 
 class mylowpass(torch.autograd.Function):
     def forward(self, input):
-        _,_,rows, cols = input.shape
+        bs,nc,rows, cols = input.shape
         crow, ccol = int(rows / 2), int(cols / 2)
-        output = torch.zeros(input.size()).cuda()
-        output[:, :,  crow - 16:crow + 16, ccol - 16:ccol + 16] = input[:, :, crow - 16:crow + 16, ccol - 16:ccol + 16]
+        frequency_limit = int(magnitudeSize/2)
+        # output = torch.zeros(bs, nc, magnitudeSize, magnitudeSize).cuda()
+        output = input[:, :, crow - frequency_limit:crow + frequency_limit, ccol - frequency_limit:ccol + frequency_limit]
         return output
 
     def backward(self, grad_outputs):
-        _, _, rows, cols = grad_outputs.shape
+        bs, nc, rows, cols = grad_outputs.shape
         crow, ccol = int(rows / 2), int(cols / 2)
-        grad_inputs = grad_outputs.clone()
-        grad_inputs[:, :, 0 : crow - 16, :] = 0
-        grad_inputs[:, :, crow+16: rows, :] = 0
-        grad_inputs[:, :, :, 0 : ccol - 16] = 0
-        grad_inputs[:, :, :, ccol+16: cols] = 0
+        frequency_limit = int(magnitudeSize / 2)
+        grad_inputs = torch.zeros(bs, nc, imageSize, imageSize).cuda()
+        grad_inputs[:, :, crow - frequency_limit:crow + frequency_limit, ccol - frequency_limit:ccol + frequency_limit] = grad_outputs
+        # grad_inputs[:, :, 0 : crow - 16, :] = 0
+        # grad_inputs[:, :, crow+16: rows, :] = 0
+        # grad_inputs[:, :, :, 0 : ccol - 16] = 0
+        # grad_inputs[:, :, :, ccol+16: cols] = 0
+
         return grad_inputs
 
 
@@ -179,8 +185,8 @@ class Trainer:
             img_gray = img
 
         re, im = fft_autograd.Fft2d()(img_gray, Variable(torch.zeros(img_gray.size()).cuda()))
-        spectrum = (re.pow(2)+ im.pow(2)).log()
-        spectrum = F.relu(spectrum)
+        spectrum = (re.pow(2)+ im.pow(2))
+        # spectrum = F.relu(spectrum)
         # spectrum[spectrum!=spectrum] = 0
         spectrum_shift = myfftshift()(spectrum)
         spectrum_shift_low = mylowpass()(spectrum_shift)
@@ -280,8 +286,17 @@ class Trainer:
         one_hot[range(100), idx] = 1
         fix_noise = torch.Tensor(100, nNoise).uniform_(-1, 1)
 
+        noise.data.copy_(fix_noise)
+        dis_c.data.copy_(torch.Tensor(one_hot))
+
+        if not load_z_fixed:
+            z_fixed = torch.cat([noise, dis_c], 1).view(-1, nClass + nNoise, 1, 1)
+            torch.save(z_fixed, '/home/zeyuan/infoGAN-pytorch/checkpoints/z_fixed.pt')
+        else:
+            z_fixed = torch.load('/home/zeyuan/infoGAN-pytorch/checkpoints/z_fixed.pt')
         D_loss_overall = np.zeros(nEpoch)
         G_loss_overall = np.zeros(nEpoch)
+
         for epoch in range(nEpoch):
             start_time = time.time()
             D_loss_epoch = np.zeros(len(dataloader))
@@ -296,6 +311,7 @@ class Trainer:
                 noise.data.resize_(bs, nNoise)
                 magnitude_real.data.resize_(bs, 1, magnitudeSize, magnitudeSize) #the size of the last batch might be smaller than the default batch size
                 magnitude_fake.data.resize_(bs, 1, magnitudeSize, magnitudeSize)
+                z_current_fixed= z_fixed[ :bs, : ,: ,:]
 
                 # D loss
                 # real part
@@ -349,23 +365,25 @@ class Trainer:
                 G_loss_1.backward()
                 optimG_mag.step()
 
+                # save the image after applying gradient from magnitude
+                if num_iters % 100 == 0:
+                    x_save = self.G(z_current_fixed)
+                    save_image(x_save.data,
+                               '%s/fixed_after_adjustment_epoch_%d.png' % (outf, epoch),
+                               normalize=normalizeImage, nrow=nCPerRow)
+                    save_image(x_save.data,
+                               '%s/fixed_after_adjustment_latest.png' % (outf),
+                               normalize=normalizeImage, nrow=nCPerRow)
+
                 #origin part
                 optimG.zero_grad()
-                fake_x = self.G(z) # regenerate the fake image with the updated G
-                fe_out = self.FE(fake_x)
+                fake_x_2 = self.G(z) # regenerate the fake image with the updated G
+                fe_out = self.FE(fake_x_2)
                 probs_fake = self.D(fe_out)
                 G_loss_2 =  criterionD(probs_fake, label)
                 G_loss_2.backward()
                 optimG.step()
                 G_loss = G_loss_1 + G_loss_2
-
-                # G_loss_mag.backward()
-                # G_loss_D = criterionD(probs_fake, label)
-                # G_loss_D.backward()
-                # G_loss = criterion_L1(magnitude_fake, magnitude_real)
-                # G_loss = criterionD(probs_fake, label)    #G tries to make D "believe" that the generated image should be classified to a real class
-                # G_loss.backward()
-                # optimG.step()
 
                 D_loss_epoch[num_iters] = D_loss.data[0]
                 G_loss_epoch[num_iters] = G_loss.data[0]
@@ -374,6 +392,7 @@ class Trainer:
                           % (epoch, nEpoch, num_iters, len(dataloader),
                              D_loss.data[0], G_loss.data[0], G_loss_1.data[0], G_loss_2.data[0], D_mag_loss.data[0]))
 
+                if num_iters % 100 == 0:
                     # save the randomly generated images
                     save_image(fake_x.data,
                                '%s/random_fake_samples_latest.png' % outf,
@@ -383,11 +402,8 @@ class Trainer:
                                normalize=normalizeImage, nrow=10)
 
                     #reproduce images using saved noise and class settings
-                    noise.data.copy_(fix_noise)
-                    dis_c.data.copy_(torch.Tensor(one_hot))
 
-                    z = torch.cat([noise, dis_c], 1).view(-1, nClass + nNoise, 1, 1)
-                    x_save = self.G(z)
+                    x_save = self.G(z_current_fixed)
                     save_image(x_save.data,
                                '%s/fixed_fake_samples_epoch_%d.png' % (outf, epoch),
                                normalize=normalizeImage, nrow=nCPerRow)

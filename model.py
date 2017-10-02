@@ -4,6 +4,7 @@ import torch.nn.functional as F
 
 nClass = trainer.nClass
 nNoise = trainer.nNoise
+magnitudeSize = trainer.magnitudeSize
 nc = trainer.nc
 
 
@@ -59,23 +60,20 @@ class D_Mag(nn.Module):
         super(D_Mag, self).__init__()
 
         self.main = nn.Sequential(
-            # 1*64*64
+            # 1*32*32
             nn.Conv2d(1, 64, 4, 2, 1),
             nn.LeakyReLU(0.2, inplace=True),
-            # 64*32*32
-            nn.Conv2d(64, 128, 4, 2, 1, bias=False),
+            # 64*16*16
+            nn.Conv2d(64, 128, 4, 2, 1, bias=True),
             nn.BatchNorm2d(128),
             nn.LeakyReLU(0.2, inplace=True),
-            # 128*16*16
-            nn.Conv2d(128, 256, 4, 2, 1, bias=False),
+            # 128*8*8
+            nn.Conv2d(128, nClass + 1 , 4, 2, 0, bias=True),
             nn.BatchNorm2d(256),
             nn.LeakyReLU(0.2, inplace=True),
-            # 256*8*8
-            nn.Conv2d(256, 512, 4, 2, 1, bias=False),
-            nn.BatchNorm2d(512),
-            nn.LeakyReLU(0.2, inplace=True),
-            # 512*4*4
-            nn.Conv2d(512, nClass + 1, 4, 1, 0, bias=False),
+            #256*4*4
+            nn.Conv2d(256, nClass + 1, 4, 1, 0, bias=True),
+            # nClass+1 * 1*1
         )
 
     def forward(self, x):
