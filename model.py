@@ -55,6 +55,28 @@ class D(nn.Module):
         output = self.main(x).view(-1, nClass + 1).squeeze()
         return output
 
+class D_Mag_FC(nn.Module):
+    def __init__(self):
+        super(D_Mag_FC, self).__init__()
+
+        self.conv1 = nn.Conv2d(1, 96, kernel_size=5)
+        self.conv2 = nn.Conv2d(96, 192, kernel_size=5)
+        self.conv2_drop = nn.Dropout2d()
+        self.fc1 = nn.Linear(4800, 1024)
+        self.fc2 = nn.Linear(1024, 512)
+        self.fc3 = nn.Linear(512, nClass+1)
+
+
+    def forward(self, x):
+        x = F.relu(F.max_pool2d(self.conv1(x), 2))
+        x = F.relu(F.max_pool2d(self.conv2_drop(self.conv2(x)), 2))
+        x = x.view(-1, 4800)
+        x = F.dropout(F.relu(self.fc1(x)))
+        x = F.dropout(F.relu(self.fc2(x)))
+        x = self.fc3(x)
+
+        return x
+
 class D_Mag(nn.Module):
     def __init__(self):
         super(D_Mag, self).__init__()
@@ -68,10 +90,14 @@ class D_Mag(nn.Module):
             nn.BatchNorm2d(128),
             nn.LeakyReLU(0.2, inplace=True),
             # 128*8*8
-            nn.Conv2d(128, nClass + 1 , 4, 2, 0, bias=True),
+            nn.Conv2d(128, 256, 4, 2, 1, bias=True),
             nn.BatchNorm2d(256),
             nn.LeakyReLU(0.2, inplace=True),
-            #256*4*4
+            # 256*4*4
+            # nn.Conv2d(256, 512 , 4, 2, 1, bias=True),
+            # nn.BatchNorm2d(512),
+            # nn.LeakyReLU(0.2, inplace=True),
+            #
             nn.Conv2d(256, nClass + 1, 4, 1, 0, bias=True),
             # nClass+1 * 1*1
         )

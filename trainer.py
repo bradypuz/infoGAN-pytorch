@@ -33,7 +33,7 @@ dataroot = '/home/zeyuan/dataset/places'
 
 # outf = './checkpoints/mnist/D_Mag_takeTurn_0.2'
 
-outf = './checkpoints/places/D_Mag_size32_w0.2_lrMag_0.00001_lr_D_0.0002_low_pass_skycraper_bridge_Bias_True_without_log'
+outf = './checkpoints/places/D_Mag_size20_w0.2_lrMag_0.00001_lrD_0.0002_skycraper_bridge_fc_v1'
 
 nClass = 2
 
@@ -44,7 +44,7 @@ nNoise = 100
 nc = 3
 if dataset_type == 'mnist':
     nc = 1
-nEpoch = 200
+nEpoch = 1000
 nCPerRow = 10
 lr_D = 0.0002
 lr_G = 0.0002
@@ -53,6 +53,7 @@ weigth_D_mag = 0.2
 normalizeImage = True
 
 load_z_fixed = True
+use_fc = True
 
 
 try:
@@ -129,12 +130,15 @@ class myfftshift(torch.autograd.Function):
 
 
 class Trainer:
-    def __init__(self, G, FE, D, D_Mag):
+    def __init__(self, G, FE, D, D_Mag, D_Mag_FC):
 
         self.G = G
         self.FE = FE
         self.D = D
-        self.D_Mag = D_Mag
+        if use_fc:
+            self.D_Mag = D_Mag_FC
+        else:
+            self.D_Mag = D_Mag
 
         self.batch_size = 100
 
@@ -186,20 +190,8 @@ class Trainer:
 
         re, im = fft_autograd.Fft2d()(img_gray, Variable(torch.zeros(img_gray.size()).cuda()))
         spectrum = (re.pow(2)+ im.pow(2))
-        # spectrum = F.relu(spectrum)
-        # spectrum[spectrum!=spectrum] = 0
         spectrum_shift = myfftshift()(spectrum)
         spectrum_shift_low = mylowpass()(spectrum_shift)
-        # spectrum = np.fft.fftshift(spectrum)
-
-        # frequency = fft.fft2(img_gray, torch.zeros(img.size()).cuda())
-        # fshift = np.fft.fftshift(frequency)
-        # magnitude_spectrum = np.log(np.abs(fshift))
-        # low pass filter
-        # #http://docs.opencv.org/3.0-beta/doc/py_tutorials/py_imgproc/py_transforms/py_fourier_transform/py_fourier_transform.html
-        # _,_, rows, cols = img.data.shape
-        # crow, ccol = int(rows / 2), int(cols / 2)
-        # magnitude_low = magnitude_spectrum[:, crow - 16:crow + 16, ccol - 16:ccol + 16]
 
         return spectrum_shift_low
 
@@ -361,19 +353,10 @@ class Trainer:
                 magnitude_fake = self.image2magnitude(fake_x)
                 probs_mag_fake = self.D_Mag(magnitude_fake)
                 label.data.copy_(torch.LongTensor(idx))
-                G_loss_1 = criterionD_Mag(probs_mag_fake, label) * weigth_D_mag
+                # L1_loss = criterion_L1(fake_x, real_x)
+                G_loss_1 = criterionD_Mag(probs_mag_fake, label)
                 G_loss_1.backward()
                 optimG_mag.step()
-
-                # save the image after applying gradient from magnitude
-                if num_iters % 100 == 0:
-                    x_save = self.G(z_current_fixed)
-                    save_image(x_save.data,
-                               '%s/fixed_after_adjustment_epoch_%d.png' % (outf, epoch),
-                               normalize=normalizeImage, nrow=nCPerRow)
-                    save_image(x_save.data,
-                               '%s/fixed_after_adjustment_latest.png' % (outf),
-                               normalize=normalizeImage, nrow=nCPerRow)
 
                 #origin part
                 optimG.zero_grad()
@@ -388,9 +371,9 @@ class Trainer:
                 D_loss_epoch[num_iters] = D_loss.data[0]
                 G_loss_epoch[num_iters] = G_loss.data[0]
                 if num_iters % 10 == 0:
-                    print('[%d/%d][%d/%d] Loss_D: %.4f Loss_G: %.4f, LossG_1: %.4f, LossG_2: %.4f, Loss_D_Mag: %.4f'
+                    print('[%d/%d][%d/%d] Loss_D: %.4f Loss_G_2: %.4f, Loss_D_Mag: %.4f, LossG_1: %.4f'
                           % (epoch, nEpoch, num_iters, len(dataloader),
-                             D_loss.data[0], G_loss.data[0], G_loss_1.data[0], G_loss_2.data[0], D_mag_loss.data[0]))
+                             D_loss.data[0], G_loss_2.data[0], D_mag_loss.data[0], G_loss_1.data[0]))
 
                 if num_iters % 100 == 0:
                     # save the randomly generated images
