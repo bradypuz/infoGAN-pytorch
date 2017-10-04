@@ -33,7 +33,7 @@ dataroot = '/home/zeyuan/dataset/places'
 
 # outf = './checkpoints/mnist/D_Mag_takeTurn_0.2'
 
-outf = './checkpoints/places/D_Mag_size20_w0.2_lrMag_0.00001_lrD_0.0002_skycraper_bridge_fc_v1'
+outf = './checkpoints/places/D_gaussian9_30_w1.0_lrBlur0.0002_lrD_0.0002_skycraper_bridge_fc_v1'
 
 nClass = 2
 
@@ -48,12 +48,18 @@ nEpoch = 1000
 nCPerRow = 10
 lr_D = 0.0002
 lr_G = 0.0002
+lr_blur = 0.0002
 lr_mag = 0.00001
 weigth_D_mag = 0.2
+weigt_blur = 1.0
 normalizeImage = True
 
 load_z_fixed = True
+use_gaussian = True
 use_fc = True
+my_filter_size = 9
+
+
 
 
 try:
@@ -130,11 +136,12 @@ class myfftshift(torch.autograd.Function):
 
 
 class Trainer:
-    def __init__(self, G, FE, D, D_Mag, D_Mag_FC):
+    def __init__(self, G, FE, D, D_Mag, D_Mag_FC, D_blur):
 
         self.G = G
         self.FE = FE
         self.D = D
+        self.D_blur = D_blur
         if use_fc:
             self.D_Mag = D_Mag_FC
         else:
@@ -178,6 +185,15 @@ class Trainer:
         plt.savefig('%s/magnitude_spectrum_random_real.pdf' % outf)
         plt.close()
 
+    def image2gray(self, img):
+        if img.data.size(1) == 3:
+            img_gray = img[:, 0, :, :].mul(0.3).add(img[:, 1, :, :].mul(0.59)).add(img[:, 2, :, :].mul(0.11))
+            img_gray = myresize()(img_gray)
+        else:
+            img_gray = img
+
+        return img_gray
+
     def image2magnitude(self, img):
         # convert RGB to grayscale and then to magnitude
         # img_gray = np.zeros((img.data.size(0), img.data.size(2), img.data.size(3)))
@@ -195,6 +211,19 @@ class Trainer:
 
         return spectrum_shift_low
 
+    #https://discuss.pytorch.org/t/how-to-perform-high-dimensional-convolution-towards-the-output-of-model/1730
+    def makeGaussian(self, kernel_size = 20, fwhm = 3, center=None):
+        x = np.arange(0, kernel_size, 1, float)
+        y = x[:, np.newaxis]
+
+        if center is None:
+            x0 = y0 = kernel_size // 2
+        else:
+            x0 = center[0]
+            y0 = center[1]
+
+        return np.exp(-4 * np.log(2) * ((x - x0) ** 2 + (y - y0) ** 2) / fwhm ** 2)
+
 
     def train(self):
         real_x = torch.FloatTensor(self.batch_size, nc, imageSize, imageSize).cuda()
@@ -203,8 +232,6 @@ class Trainer:
         noise = torch.FloatTensor(self.batch_size, nNoise).cuda()
         magnitude_real = torch.FloatTensor(self.batch_size, 1, magnitudeSize, magnitudeSize).cuda()
         magnitude_fake = torch.FloatTensor(self.batch_size, 1, magnitudeSize, magnitudeSize).cuda()
-
-
 
         real_x = Variable(real_x)
         magnitude_real = Variable(magnitude_real, requires_grad=False)
@@ -271,6 +298,8 @@ class Trainer:
                                 betas=(0.5, 0.999))
         optimD_Mag = optim.Adam([{'params': self.D_Mag.parameters()}], lr=lr_mag,
                                 betas=(0.5, 0.999))
+        optimD_blur = optim.Adam([{'params': self.D_blur.parameters()}], lr=lr_blur,
+                                 betas=(0.5, 0.999))
 
         # fixed random variables
         idx = np.arange(nClass).repeat(100 / nClass)
@@ -327,53 +356,75 @@ class Trainer:
                 D_loss = loss_real + loss_fake
                 optimD.step()
 
+                #D_blur loss
+                # build the gaussian kernel
+                if use_gaussian:
+                    g = self.makeGaussian(kernel_size=my_filter_size, fwhm=30)
+                    padding_size = int((my_filter_size-1)/2)
+                    kernel = torch.FloatTensor(g)
+                    kernel = torch.stack(
+                        [kernel for i in range(1)])  # this stacks the kernel into 3 identical 'channels' for rgb images
+                    # batched_gaussian = Variable(
+                    #     torch.stack([kernel for i in range(bs)])).cuda()  # stack kernel into batches
+                    # batched_gaussian = Variable(kernel).cuda()
+                    batched_gaussian = Variable(
+                        torch.stack([kernel for i in range(1)])).cuda()
 
-                #D_Mag loss
-                optimD_Mag.zero_grad()
-                magnitude_real.data.copy_(self.image2magnitude(real_x).data)
-                magnitude_fake= self.image2magnitude(fake_x.detach())
-                #real part
-                probs_mag_real = self.D_Mag(magnitude_real)
+                optimD_blur.zero_grad()
+                if use_gaussian:
+                    real_x = F.conv2d(self.image2gray(real_x), batched_gaussian, padding=padding_size)
+                    if num_iters % 100 == 0:
+                        save_image(real_x.data,
+                                   '%s/real_blurred_latest.png' % (outf),
+                                   normalize=normalizeImage, nrow=nCPerRow)
+                probs_real = self.D_blur(real_x)
                 label.data.copy_(batch_labels)
-                loss_mag_real = criterionD_Mag(probs_mag_real, label) * weigth_D_mag
-                loss_mag_real.backward()
-
-                #fake part
-                probs_mag_fake = self.D_Mag(magnitude_fake.detach())
+                loss_real_blur = criterionD(probs_real, label) * weigt_blur
+                loss_real_blur.backward()
+                if use_gaussian:
+                    fake_x_blur = F.conv2d(self.image2gray(fake_x.detach()), batched_gaussian, padding=padding_size)
+                    probs_fake = self.D_blur(fake_x_blur.detach())
+                else:
+                    probs_fake = self.D_blur(fake_x.detach())
                 label.data.fill_(nClass)
-                loss_mag_fake = criterionD_Mag(probs_mag_fake,label) * weigth_D_mag
-                loss_mag_fake.backward()
+                loss_fake_blur = criterionD(probs_fake, label)
+                loss_fake_blur.backward()
+                D_loss_blur = loss_real_blur + loss_fake_blur
+                optimD_blur.step()
 
-                D_mag_loss = loss_mag_real + loss_mag_fake
-                optimD_Mag.step()
 
-                # G loss
-                optimG_mag.zero_grad()
-                #mag part
-                magnitude_fake = self.image2magnitude(fake_x)
-                probs_mag_fake = self.D_Mag(magnitude_fake)
-                label.data.copy_(torch.LongTensor(idx))
-                # L1_loss = criterion_L1(fake_x, real_x)
-                G_loss_1 = criterionD_Mag(probs_mag_fake, label)
-                G_loss_1.backward()
-                optimG_mag.step()
 
-                #origin part
+
+                #G loss
                 optimG.zero_grad()
-                fake_x_2 = self.G(z) # regenerate the fake image with the updated G
-                fe_out = self.FE(fake_x_2)
-                probs_fake = self.D(fe_out)
-                G_loss_2 =  criterionD(probs_fake, label)
+                if use_gaussian:
+                    fake_x_blur = F.conv2d(self.image2gray(fake_x), batched_gaussian, padding=padding_size)  # nnf is torch.nn.functional
+                    probs_fake_1 = self.D_blur(fake_x_blur)
+                else:
+                    probs_fake_1 = self.D_blur(fake_x)
+
+                label.data.copy_(torch.LongTensor(idx))
+                G_loss_1 = criterionD(probs_fake_1, label) *weigt_blur
+                G_loss_1.backward()
+                optimG.step()
+
+                fake_x = self.G(z)
+                fe_out = self.FE(fake_x)
+                probs_fake_2 = self.D(fe_out)
+                G_loss_2 =  criterionD(probs_fake_2, label)
+
                 G_loss_2.backward()
                 optimG.step()
+                # G_loss_2 = G_loss_1 #false line
+
                 G_loss = G_loss_1 + G_loss_2
 
                 D_loss_epoch[num_iters] = D_loss.data[0]
                 G_loss_epoch[num_iters] = G_loss.data[0]
                 if num_iters % 10 == 0:
-                    print('[%d/%d][%d/%d] Loss_D: %.4f Loss_G_2: %.4f, Loss_D_Mag: %.4f, LossG_1: %.4f'
+                    print('[%d/%d][%d/%d] Loss_D: %.4f Loss_G_2: %.4f, LossG_1: %.4f, Loss_D_blur: %.4f'
                           % (epoch, nEpoch, num_iters, len(dataloader),
-                             D_loss.data[0], G_loss_2.data[0], D_mag_loss.data[0], G_loss_1.data[0]))
+                             D_loss.data[0], G_loss_2.data[0], G_loss_1.data[0], D_loss_blur.data[0]))
 
                 if num_iters % 100 == 0:
                     # save the randomly generated images

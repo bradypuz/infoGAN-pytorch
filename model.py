@@ -6,6 +6,7 @@ nClass = trainer.nClass
 nNoise = trainer.nNoise
 magnitudeSize = trainer.magnitudeSize
 nc = trainer.nc
+use_gaussian = trainer.use_gaussian
 
 
 class FrontEnd(nn.Module):
@@ -54,6 +55,41 @@ class D(nn.Module):
     def forward(self, x):
         output = self.main(x).view(-1, nClass + 1).squeeze()
         return output
+
+class D_blur(nn.Module):
+    def __init__(self):
+        super(D_blur, self).__init__()
+        if not use_gaussian:
+            self.nc = nc
+        else:
+            self.nc = 1
+        self.avg = nn.AvgPool2d(kernel_size=15, stride=1, padding=7)
+        self.main = nn.Sequential(
+            # 1*64*64
+            nn.Conv2d(self.nc, 64, 4, 2, 1),
+            nn.LeakyReLU(0.2, inplace=True),
+            # 64*32*32
+            nn.Conv2d(64, 128, 4, 2, 1, bias=False),
+            nn.BatchNorm2d(128),
+            nn.LeakyReLU(0.2, inplace=True),
+            # 128*16*16
+            nn.Conv2d(128, 256, 4, 2, 1, bias=False),
+            nn.BatchNorm2d(256),
+            nn.LeakyReLU(0.2, inplace=True),
+            # 256*8*8
+            nn.Conv2d(256, 512, 4, 2, 1, bias=False),
+            nn.BatchNorm2d(512),
+            nn.LeakyReLU(0.2, inplace=True),
+            # 512*4*4
+            nn.Conv2d(512, nClass + 1, 4, 1, 0, bias=False),
+        )
+
+    def forward(self, x):
+        if not use_gaussian:
+            x = self.avg(x)
+        output = self.main(x).view(-1, nClass + 1).squeeze()
+        return output
+
 
 class D_Mag_FC(nn.Module):
     def __init__(self):
